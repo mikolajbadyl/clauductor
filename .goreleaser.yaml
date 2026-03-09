@@ -1,0 +1,101 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+version: 2
+
+project_name: clauductor
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+release:
+  github:
+    owner: mikolajbadyl
+    name: clauductor
+  name_template: "v{{ .Version }}"
+  prerelease: auto
+  extra_files:
+    - glob: ./install.sh
+    - glob: ./install.ps1
+
+builds:
+  - id: clauductor
+    binary: clauductor
+    main: .
+    dir: backend
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.buildVersion={{ .Version }}
+
+archives:
+  - id: clauductor
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - install.sh
+      - install.ps1
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: 0
+  groups:
+    - title: "Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Other Changes"
+      order: 999
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+      - "typo"
+
+nfpms:
+  - id: clauductor
+    package_name: clauductor
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    maintainer: "Mikołaj Badyl <contact@octrafic.com>"
+    description: "Visual web interface for Claude Code with real-time work map"
+    homepage: "https://github.com/mikolajbadyl/clauductor"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/clauductor/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/clauductor/README.md
+    deb:
+      lintian_overrides:
+        - statically-linked-binary
+        - changelog-file-missing-in-native-package

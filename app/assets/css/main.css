@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        --background: 248 250 252;
+        --foreground: 15 23 42;
+
+        --card: 255 255 255;
+        --card-foreground: 15 23 42;
+
+        --border: 226 232 240;
+        --input: 226 232 240;
+        --ring: 14 165 233;
+
+        --radius: 0.75rem;
+
+        color-scheme: light;
+    }
+
+    .dark {
+        --background: 10 14 26;
+        --foreground: 232 237 245;
+
+        --card: 15 21 37;
+        --card-foreground: 232 237 245;
+
+        --border: 26 34 53;
+        --input: 26 34 53;
+        --ring: 14 165 233;
+
+        color-scheme: dark;
+    }
+
+    * {
+        border-color: rgb(var(--border) / 0.6);
+    }
+
+    body {
+        background-color: rgb(var(--background));
+        color: rgb(var(--foreground));
+        @apply antialiased selection:bg-sky-500/30 selection:text-sky-50;
+        margin: 0;
+        padding: 0;
+        /* Prevent mobile browser from resizing on keyboard open */
+        overflow: hidden;
+        position: fixed;
+        width: 100%;
+        height: 100%;
+    }
+
+    /* Use dynamic viewport height to handle mobile browser chrome */
+    #__nuxt {
+        height: 100dvh;
+        height: -webkit-fill-available;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        @apply font-heading tracking-tight;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+        width: 5px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: rgb(var(--border));
+        border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #cbd5e1;
+    }
+
+    .dark ::-webkit-scrollbar-thumb:hover {
+        background: #2a3550;
+    }
+
+    /* Prevent pull-to-refresh on mobile */
+    html {
+        overscroll-behavior: none;
+    }
+}
