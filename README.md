@@ -2,7 +2,7 @@
 
 Visual web interface for Claude Code. See your AI's work as a real-time execution map - tool calls, file edits, bash commands while chatting.
 
-![Clauductor Screenshot](assets/clauductor_screenshot.png)
+![Clauductor Screenshot](assets/clauductor_screenshot.png) 
 
 ## Features
 
