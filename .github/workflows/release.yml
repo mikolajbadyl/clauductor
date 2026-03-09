@@ -33,6 +33,7 @@ jobs:
           npm run generate
           rm -rf backend/frontend
           cp -r .output/public backend/frontend
+          rm -f package-lock.json
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
