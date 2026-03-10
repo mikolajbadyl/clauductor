@@ -30,9 +30,7 @@ jobs:
       - name: Build frontend
         run: |
           npm install
-          npm run generate
-          rm -rf backend/frontend
-          cp -r .output/public backend/frontend
+          make frontend
           rm -f package-lock.json
 
       - name: Run GoReleaser

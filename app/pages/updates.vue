@@ -5,6 +5,7 @@ import { backendUrl } from '~/utils/api'
 const isSidebarOpen = ref(false)
 const activeTab = ref('clauductor')
 const claudeCodeChangelog = ref('')
+const clauductorChangelog = ref('')
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -15,7 +16,13 @@ const updateAvailable = computed(() => {
   return compareVersions(latestVersion.value, installedVersion.value) > 0
 })
 
-// Update modal state
+const clauductorInstalledVersion = ref('')
+const clauductorLatestVersion = ref('')
+const clauductorUpdateAvailable = computed(() => {
+  if (!clauductorInstalledVersion.value || !clauductorLatestVersion.value) return false
+  return compareVersions(clauductorLatestVersion.value, clauductorInstalledVersion.value) > 0
+})
+
 const updateModalOpen = ref(false)
 const updateLogs = ref<string[]>([])
 const updateRunning = ref(false)
@@ -51,7 +58,17 @@ async function fetchInstalledVersion() {
       installedVersion.value = parseVersion(data.version || '')
     }
   } catch {
-    // ignore
+  }
+}
+
+async function fetchClauductorInstalledVersion() {
+  try {
+    const res = await fetch(backendUrl('/api/clauductor-version'))
+    if (res.ok) {
+      const data = await res.json()
+      clauductorInstalledVersion.value = parseVersion(data.version || '')
+    }
+  } catch {
   }
 }
 
@@ -75,20 +92,62 @@ async function fetchClaudeCodeChangelog() {
   }
 }
 
+async function fetchClauductorChangelog() {
+  if (clauductorChangelog.value) return
+
+  loading.value = true
+  error.value = null
+  try {
+    const response = await fetch('https://api.github.com/repos/mikolajbadyl/clauductor/releases')
+    if (!response.ok) throw new Error('Failed to fetch releases')
+    const releases = await response.json()
+
+    if (releases.length > 0) {
+      clauductorLatestVersion.value = parseVersion(releases[0].tag_name || '')
+
+      let markdown = ''
+      for (const release of releases) {
+        const version = release.tag_name || release.name
+        const date = new Date(release.published_at).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+        markdown += `## ${version}\n\n`
+        markdown += `_${date}_\n\n`
+        markdown += (release.body || 'No release notes available.') + '\n\n'
+      }
+      clauductorChangelog.value = markdown
+    }
+  } catch (e) {
+    console.error('Error fetching Clauductor releases:', e)
+    error.value = 'Could not load release notes from GitHub.'
+  } finally {
+    loading.value = false
+  }
+}
+
 const renderedClaudeCode = computed(() => {
   if (!claudeCodeChangelog.value) return ''
   return renderMarkdown(claudeCodeChangelog.value)
 })
 
-async function startUpdate() {
+const renderedClauductor = computed(() => {
+  if (!clauductorChangelog.value) return ''
+  return renderMarkdown(clauductorChangelog.value)
+})
+
+async function startUpdate(type: 'claude' | 'clauductor' = 'claude') {
   updateModalOpen.value = true
   updateLogs.value = []
   updateRunning.value = true
   updateDone.value = false
   updateError.value = ''
 
+  const endpoint = type === 'clauductor' ? '/api/clauductor-update' : '/api/claude-update'
+
   try {
-    const res = await fetch(backendUrl('/api/claude-update'), { method: 'POST' })
+    const res = await fetch(backendUrl(endpoint), { method: 'POST' })
     if (!res.ok || !res.body) {
       updateError.value = 'Failed to start update.'
       updateRunning.value = false
@@ -122,8 +181,11 @@ async function startUpdate() {
         } else if (eventType === 'done') {
           updateDone.value = true
           updateRunning.value = false
-          // Refresh installed version
-          await fetchInstalledVersion()
+          if (type === 'clauductor') {
+            await fetchClauductorInstalledVersion()
+          } else {
+            await fetchInstalledVersion()
+          }
         } else if (eventType === 'error') {
           updateError.value = data
           updateRunning.value = false
@@ -144,6 +206,9 @@ watch(activeTab, (newTab) => {
   if (newTab === 'claude-code') {
     fetchClaudeCodeChangelog()
     fetchInstalledVersion()
+  } else if (newTab === 'clauductor') {
+    fetchClauductorChangelog()
+    fetchClauductorInstalledVersion()
   }
 })
 
@@ -151,6 +216,9 @@ onMounted(() => {
   if (activeTab.value === 'claude-code') {
     fetchClaudeCodeChangelog()
     fetchInstalledVersion()
+  } else if (activeTab.value === 'clauductor') {
+    fetchClauductorChangelog()
+    fetchClauductorInstalledVersion()
   }
 })
 </script>
@@ -255,17 +323,42 @@ onMounted(() => {
         </div>
 
         <Transition name="fade-slide" mode="out-in">
-          <div v-if="activeTab === 'clauductor'" class="space-y-8 py-10 text-center">
-            <div class="flex flex-col items-center gap-4">
-              <div class="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-900 flex items-center justify-center border border-slate-200 dark:border-border/20">
-                <UIcon name="i-lucide-sparkles" class="w-8 h-8 text-slate-400 dark:text-slate-500" />
+          <div v-if="activeTab === 'clauductor'" class="space-y-6">
+            <Transition name="fade-slide">
+              <div
+                v-if="clauductorUpdateAvailable"
+                class="p-4 bg-sky-500/10 border border-sky-500/20 rounded-2xl flex items-center justify-between gap-4 flex-wrap"
+              >
+                <div class="flex items-center gap-3">
+                  <UIcon name="i-lucide-arrow-up-circle" class="w-5 h-5 text-sky-500 shrink-0" />
+                  <div>
+                    <p class="text-sm font-semibold text-sky-600 dark:text-sky-400">Update available: v{{ clauductorLatestVersion }}</p>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Installed: v{{ clauductorInstalledVersion }}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  @click="startUpdate('clauductor')"
+                  class="flex items-center gap-2 px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white text-sm font-semibold rounded-xl transition-colors shrink-0"
+                >
+                  <UIcon name="i-lucide-download" class="w-4 h-4" />
+                  Update now
+                </button>
               </div>
-              <div class="space-y-1">
-                <h3 class="text-lg font-bold text-foreground">Clauductor Releases</h3>
-                <p class="text-sm text-slate-500 max-w-xs mx-auto">
-                  Changelog will appear here soon. Stay tuned for the first official release notes.
-                </p>
-              </div>
+            </Transition>
+
+            <div v-if="error" class="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center gap-3 text-red-500 text-sm">
+              <UIcon name="i-lucide-triangle-alert" class="w-5 h-5" />
+              {{ error }}
+            </div>
+
+            <div v-else-if="!loading && renderedClauductor" class="markdown-content overflow-x-auto">
+              <div v-html="renderedClauductor"></div>
+            </div>
+
+            <div v-else-if="loading" class="space-y-4">
+              <div v-for="i in 5" :key="i" class="h-20 bg-slate-100 dark:bg-slate-800 animate-pulse rounded-xl"></div>
             </div>
           </div>
 
@@ -285,7 +378,7 @@ onMounted(() => {
                   </div>
                 </div>
                 <button
-                  @click="startUpdate"
+                  @click="startUpdate('claude')"
                   class="flex items-center gap-2 px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white text-sm font-semibold rounded-xl transition-colors shrink-0"
                 >
                   <UIcon name="i-lucide-download" class="w-4 h-4" />
@@ -299,7 +392,7 @@ onMounted(() => {
               {{ error }}
             </div>
 
-            <div v-else-if="!loading && renderedClaudeCode" class="markdown-content p-6 sm:p-8 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-border/20 shadow-sm overflow-x-auto">
+            <div v-else-if="!loading && renderedClaudeCode" class="markdown-content overflow-x-auto">
               <div v-html="renderedClaudeCode"></div>
             </div>
 
@@ -346,23 +439,31 @@ onMounted(() => {
 }
 
 .markdown-content :deep(h1) {
-  @apply text-2xl font-bold mb-6 border-b border-slate-200 dark:border-border/20 pb-2 text-foreground;
+  @apply text-2xl font-bold mb-4 mt-0 text-foreground;
 }
 
 .markdown-content :deep(h2) {
-  @apply text-xl font-bold mt-8 mb-4 text-foreground;
+  @apply text-lg font-bold mt-8 mb-3 text-foreground first:mt-0;
 }
 
 .markdown-content :deep(h3) {
-  @apply text-lg font-bold mt-6 mb-2 text-foreground;
+  @apply text-base font-semibold mt-4 mb-2 text-foreground;
 }
 
 .markdown-content :deep(p) {
-  @apply mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300;
+  @apply mb-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400;
+}
+
+.markdown-content :deep(em) {
+  @apply text-xs text-slate-500 dark:text-slate-500 not-italic;
 }
 
 .markdown-content :deep(ul) {
-  @apply list-disc list-inside mb-4 ml-2 space-y-1 text-sm text-slate-600 dark:text-slate-300;
+  @apply list-disc pl-5 mb-3 space-y-1.5 text-sm text-slate-600 dark:text-slate-400;
+}
+
+.markdown-content :deep(ol) {
+  @apply list-decimal pl-5 mb-3 space-y-1.5 text-sm text-slate-600 dark:text-slate-400;
 }
 
 .markdown-content :deep(li) {
@@ -370,14 +471,30 @@ onMounted(() => {
 }
 
 .markdown-content :deep(code) {
-  @apply px-1.5 py-0.5 bg-slate-200 dark:bg-slate-800 rounded-md font-mono text-xs text-slate-800 dark:text-slate-200;
+  @apply px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono text-xs text-slate-800 dark:text-slate-200;
+}
+
+.markdown-content :deep(pre) {
+  @apply bg-slate-100 dark:bg-slate-900 rounded-lg p-3 mb-3 overflow-x-auto;
+}
+
+.markdown-content :deep(pre code) {
+  @apply bg-transparent p-0;
 }
 
 .markdown-content :deep(a) {
-  @apply text-sky-500 hover:underline;
+  @apply text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 underline underline-offset-2;
+}
+
+.markdown-content :deep(blockquote) {
+  @apply border-l-4 border-slate-300 dark:border-slate-700 pl-4 my-3 text-slate-600 dark:text-slate-400 italic;
 }
 
 .markdown-content :deep(hr) {
-  @apply my-8 border-slate-200 dark:border-border/20;
+  @apply my-6 border-slate-200 dark:border-border/20;
+}
+
+.markdown-content :deep(strong) {
+  @apply font-semibold text-foreground;
 }
 </style>

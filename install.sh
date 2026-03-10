@@ -2,7 +2,7 @@
 set -e
 
 REPO="mikolajbadyl/clauductor"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="$HOME/.local/bin"
 BINARY="clauductor"
 DRY_RUN=false
 
@@ -64,21 +64,7 @@ detect_platform() {
     esac
 
     info "Platform: $os/$arch"
-
-    pkg_manager="none"
-    if [ "$os" = "linux" ]; then
-        if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-            pkg_manager="deb"
-        elif command -v rpm >/dev/null 2>&1 && (command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1); then
-            pkg_manager="rpm"
-        fi
-    fi
-
-    if [ "$pkg_manager" != "none" ]; then
-        info "Package manager: $pkg_manager"
-    else
-        info "Install method: binary"
-    fi
+    info "Install method: user binary"
 }
 
 fetch_version() {
@@ -101,64 +87,50 @@ fetch_version() {
 install_package() {
     step "Installing"
 
-    case "$pkg_manager" in
-        deb)
-            url="https://github.com/${REPO}/releases/download/${tag}/${BINARY}_${tag#v}_linux_${arch}.deb"
-            info "Downloading .deb package..."
-            if [ "$DRY_RUN" = true ]; then
-                run curl -fsSL "$url" -o /tmp/clauductor.deb
-                run sudo dpkg -i /tmp/clauductor.deb
-            else
-                tmp=$(mktemp /tmp/clauductor-XXXXXX.deb)
-                curl -fsSL "$url" -o "$tmp"
-                info "Installing (requires sudo)..."
-                sudo dpkg -i "$tmp"
-                rm -f "$tmp"
-            fi
-            ;;
-        rpm)
-            url="https://github.com/${REPO}/releases/download/${tag}/${BINARY}_${tag#v}_linux_${arch}.rpm"
-            info "Downloading .rpm package..."
-            if [ "$DRY_RUN" = true ]; then
-                run curl -fsSL "$url" -o /tmp/clauductor.rpm
-                if command -v dnf >/dev/null 2>&1; then
-                    run sudo dnf install -y /tmp/clauductor.rpm
-                else
-                    run sudo yum install -y /tmp/clauductor.rpm
-                fi
-            else
-                tmp=$(mktemp /tmp/clauductor-XXXXXX.rpm)
-                curl -fsSL "$url" -o "$tmp"
-                info "Installing (requires sudo)..."
-                if command -v dnf >/dev/null 2>&1; then
-                    sudo dnf install -y "$tmp"
-                else
-                    sudo yum install -y "$tmp"
-                fi
-                rm -f "$tmp"
-            fi
-            ;;
+    archive="${BINARY}-${os}-${arch}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+
+    info "Downloading binary..."
+    if [ "$DRY_RUN" = true ]; then
+        run curl -fsSL "$url" -o "/tmp/${archive}"
+        run tar -xzf "/tmp/${archive}" -C /tmp
+        run mkdir -p "${INSTALL_DIR}"
+        run install -m 755 "/tmp/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+    else
+        tmp=$(mktemp -d /tmp/clauductor-XXXXXX)
+        curl -fsSL "$url" -o "${tmp}/${archive}"
+        info "Extracting..."
+        tar -xzf "${tmp}/${archive}" -C "$tmp"
+        info "Installing to ${INSTALL_DIR}..."
+        mkdir -p "${INSTALL_DIR}"
+        install -m 755 "${tmp}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+        rm -rf "$tmp"
+    fi
+
+    success "Installed to ${INSTALL_DIR}/${BINARY}"
+
+    # Add to PATH if not already there
+    case ":$PATH:" in
+        *":${INSTALL_DIR}:"*) ;;
         *)
-            archive="${BINARY}-${os}-${arch}.tar.gz"
-            url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
-            info "Downloading binary..."
-            if [ "$DRY_RUN" = true ]; then
-                run curl -fsSL "$url" -o "/tmp/${archive}"
-                run tar -xzf "/tmp/${archive}" -C /tmp
-                run sudo install -m 755 "/tmp/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+            info "Adding ${INSTALL_DIR} to PATH..."
+            shell_rc=""
+            if [ -n "$BASH_VERSION" ]; then
+                shell_rc="$HOME/.bashrc"
+            elif [ -n "$ZSH_VERSION" ]; then
+                shell_rc="$HOME/.zshrc"
+            fi
+
+            if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
+                echo "" >> "$shell_rc"
+                echo "# Added by Clauductor installer" >> "$shell_rc"
+                echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$shell_rc"
+                warn "Added to $shell_rc - restart your shell or run: export PATH=\"\$PATH:${INSTALL_DIR}\""
             else
-                tmp=$(mktemp -d /tmp/clauductor-XXXXXX)
-                curl -fsSL "$url" -o "${tmp}/${archive}"
-                info "Extracting..."
-                tar -xzf "${tmp}/${archive}" -C "$tmp"
-                info "Installing to ${INSTALL_DIR} (requires sudo)..."
-                sudo install -m 755 "${tmp}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-                rm -rf "$tmp"
+                warn "Add ${INSTALL_DIR} to your PATH manually"
             fi
             ;;
     esac
-
-    success "Installed to ${INSTALL_DIR}/${BINARY}"
 }
 
 setup_mcp() {
