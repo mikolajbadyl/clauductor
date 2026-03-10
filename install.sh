@@ -87,7 +87,13 @@ fetch_version() {
 install_package() {
     step "Installing"
 
-    archive="${BINARY}-${os}-${arch}.tar.gz"
+    os_capitalized="$(echo "${os:0:1}" | tr '[:lower:]' '[:upper:]')${os:1}"
+    arch_name="${arch}"
+    if [ "$arch" = "amd64" ]; then
+        arch_name="x86_64"
+    fi
+
+    archive="${BINARY}_${os_capitalized}_${arch_name}.tar.gz"
     url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
 
     info "Downloading binary..."

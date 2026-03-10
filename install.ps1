@@ -33,7 +33,8 @@ Write-Info "Version: $tag"
 # Download and install
 Write-Step "Installing"
 
-$archive = "clauductor-windows-$arch.zip"
+$archName = if ($arch -eq "amd64") { "x86_64" } else { $arch }
+$archive = "clauductor_Windows_$archName.zip"
 $url = "https://github.com/$repo/releases/download/$tag/$archive"
 $tmp = Join-Path $env:TEMP "clauductor-install"
 
