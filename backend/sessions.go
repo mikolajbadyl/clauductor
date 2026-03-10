@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -85,6 +86,42 @@ func sessionHandler(c *gin.Context) {
 func claudeDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude")
+}
+
+func detectClaudeBinary() string {
+	out, err := exec.Command("which", "claude").Output()
+	if err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	// Fallback to common locations
+	locations := []string{
+		"/usr/local/bin/claude",
+		"/usr/bin/claude",
+		filepath.Join(os.Getenv("HOME"), "bin", "claude"),
+		filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude"),
+	}
+	for _, loc := range locations {
+		if _, err := os.Stat(loc); err == nil {
+			return loc
+		}
+	}
+	return "claude"
+}
+
+func getClaudeBinary() string {
+	// Try to read from settings.json
+	path := filepath.Join(claudeDir(), "settings.json")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var config map[string]any
+		if err := json.Unmarshal(data, &config); err == nil {
+			if path, ok := config["claudePath"].(string); ok && path != "" {
+				return path
+			}
+		}
+	}
+	// Fallback to auto-detect
+	return detectClaudeBinary()
 }
 
 func encodeProjectPath(p string) string {

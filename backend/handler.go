@@ -420,7 +420,6 @@ func permissionNotifyHandler(c *gin.Context) {
 	b := make([]byte, 16)
 	rand.Read(b)
 	reqID := fmt.Sprintf("%x", b)
-	// Get sessionID from clientID
 	var sessionID string
 	clientToSession.RLock()
 	if sid, ok := clientToSession.m[body.ClientID]; ok {
@@ -533,7 +532,6 @@ func stopHandler(c *gin.Context) {
 
 	targetClientID := body.ClientID
 
-	// If sessionId is provided, find the actual client that's running this session
 	if body.SessionID != "" {
 		sessionRunClients.RLock()
 		if actualClient, ok := sessionRunClients.m[body.SessionID]; ok {
@@ -610,7 +608,6 @@ func sessionClaimHandler(c *gin.Context) {
 	clientToSession.m[body.ClientID] = sessionId
 	clientToSession.Unlock()
 
-	// Send any pending permissions to the new client
 	if isActive {
 		permissionStore.RLock()
 		for _, p := range permissionStore.m {
@@ -782,15 +779,57 @@ func activeSessionsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-const claudeBinary = "/usr/local/bin/claude"
-
 func claudeVersionHandler(c *gin.Context) {
-	out, err := exec.Command(claudeBinary, "-v").Output()
+	out, err := exec.Command(getClaudeBinary(), "-v").Output()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"version": strings.TrimSpace(string(out))})
+}
+
+func claudePathHandler(c *gin.Context) {
+	if c.Request.Method == "GET" {
+		detected := detectClaudeBinary()
+		current := getClaudeBinary()
+		c.JSON(http.StatusOK, gin.H{
+			"detected": detected,
+			"current":  current,
+		})
+		return
+	}
+
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	path := filepath.Join(claudeDir(), "settings.json")
+	var config map[string]any
+	data, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(data, &config)
+	} else {
+		config = make(map[string]any)
+	}
+
+	config["claudePath"] = req.Path
+
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := os.WriteFile(path, newData, 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func claudeUpdateHandler(c *gin.Context) {
@@ -800,7 +839,130 @@ func claudeUpdateHandler(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	pr, pw := io.Pipe()
-	cmd := exec.Command(claudeBinary, "update")
+	cmd := exec.Command(getClaudeBinary(), "update")
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", err.Error())
+		c.Writer.Flush()
+		return
+	}
+
+	type lineMsg struct {
+		line string
+		err  error
+		done bool
+	}
+	ch := make(chan lineMsg, 100)
+
+	go func() {
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			ch <- lineMsg{line: scanner.Text()}
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- lineMsg{err: err}
+		} else {
+			ch <- lineMsg{done: true}
+		}
+		close(ch)
+	}()
+
+	go func() {
+		cmd.Wait()
+		pw.Close()
+	}()
+
+	ctx := c.Request.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+			pr.Close()
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			if msg.done {
+				fmt.Fprintf(c.Writer, "event: done\ndata: \n\n")
+				c.Writer.Flush()
+				return
+			}
+			if msg.err != nil {
+				fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", msg.err.Error())
+				c.Writer.Flush()
+				return
+			}
+			fmt.Fprintf(c.Writer, "event: log\ndata: %s\n\n", msg.line)
+			c.Writer.Flush()
+		}
+	}
+}
+
+func clauductorVersionHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"version": buildVersion})
+}
+
+func clauductorUpdateHandler(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	isWindows := false
+	scriptURL := "https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.sh"
+	if _, err := exec.LookPath("powershell"); err == nil {
+		scriptURL = "https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.ps1"
+		isWindows = true
+	}
+
+	resp, err := http.Get(scriptURL)
+	if err != nil {
+		fmt.Fprintf(c.Writer, "event: error\ndata: Failed to download installer: %s\n\n", err.Error())
+		c.Writer.Flush()
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(c.Writer, "event: error\ndata: Failed to download installer: HTTP %d\n\n", resp.StatusCode)
+		c.Writer.Flush()
+		return
+	}
+
+	scriptContent, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintf(c.Writer, "event: error\ndata: Failed to read installer: %s\n\n", err.Error())
+		c.Writer.Flush()
+		return
+	}
+
+	var tmpFile string
+	if isWindows {
+		tmpFile = filepath.Join(os.TempDir(), "clauductor-install.ps1")
+	} else {
+		tmpFile = filepath.Join(os.TempDir(), "clauductor-install.sh")
+	}
+
+	if err := os.WriteFile(tmpFile, scriptContent, 0755); err != nil {
+		fmt.Fprintf(c.Writer, "event: error\ndata: Failed to save installer: %s\n\n", err.Error())
+		c.Writer.Flush()
+		return
+	}
+	defer os.Remove(tmpFile)
+
+	var cmd *exec.Cmd
+	if isWindows {
+		cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", tmpFile)
+	} else {
+		cmd = exec.Command("sh", tmpFile)
+	}
+
+	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 

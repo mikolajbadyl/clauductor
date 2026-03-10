@@ -15,6 +15,47 @@ const saveSuccess = ref(false)
 const editorContainerRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 
+// --- Claude Path ---
+const claudePath = ref('')
+const claudePathDetected = ref('')
+const claudePathLoading = ref(false)
+const claudePathSaving = ref(false)
+
+async function fetchClaudePath() {
+  claudePathLoading.value = true
+  try {
+    const res = await fetch(backendUrl('/api/claude-path'))
+    if (res.ok) {
+      const data = await res.json()
+      claudePathDetected.value = data.detected || ''
+      claudePath.value = data.current || ''
+    }
+  } catch (e) {
+    console.error('Failed to fetch claude path', e)
+  } finally {
+    claudePathLoading.value = false
+  }
+}
+
+async function saveClaudePath() {
+  claudePathSaving.value = true
+  try {
+    const res = await fetch(backendUrl('/api/claude-path'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: claudePath.value })
+    })
+    if (res.ok) {
+      // Refresh version info
+      await fetchClaudePath()
+    }
+  } catch (e) {
+    console.error('Failed to save claude path', e)
+  } finally {
+    claudePathSaving.value = false
+  }
+}
+
 // --- Profiles ---
 interface Profile {
   name: string
@@ -206,6 +247,7 @@ watch(configRaw, async (newVal) => {
 onMounted(() => {
   fetchConfig()
   fetchProfiles()
+  fetchClaudePath()
 })
 
 const tabs = [
@@ -296,6 +338,38 @@ const tabs = [
 
           <!-- CLAUDE CODE TAB -->
           <div v-else-if="activeTab === 'claude'" class="space-y-6">
+            <!-- Claude Path Section -->
+            <div class="p-5 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-border/20">
+              <div class="flex items-center gap-2 mb-3">
+                <UIcon name="i-lucide-folder-search" class="w-4 h-4 text-sky-500" />
+                <h3 class="text-sm font-bold text-foreground">Claude Binary Path</h3>
+              </div>
+              <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+                Set the path to the Claude Code binary. Leave empty to use auto-detected path.
+              </p>
+              <div class="space-y-3">
+                <div v-if="claudePathDetected" class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <UIcon name="i-lucide-radar" class="w-3.5 h-3.5" />
+                  <span>Detected: <code class="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-800 rounded font-mono">{{ claudePathDetected }}</code></span>
+                </div>
+                <div class="flex gap-2">
+                  <UInput
+                    v-model="claudePath"
+                    placeholder="Auto-detect (e.g. /usr/local/bin/claude)"
+                    class="flex-1 font-mono text-xs"
+                  />
+                  <UButton
+                    @click="saveClaudePath"
+                    :loading="claudePathSaving"
+                    color="sky"
+                    size="sm"
+                  >
+                    Save
+                  </UButton>
+                </div>
+              </div>
+            </div>
+
             <div class="flex items-center justify-between">
               <div class="space-y-1">
                 <h3 class="text-xs font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Claude Code Settings</h3>
