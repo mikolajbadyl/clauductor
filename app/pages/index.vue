@@ -94,6 +94,9 @@ function handleProjectSelect(sessionId: string, projectPath: string, encodedDir:
 }
 
 async function handleRestoreSession(sessionId: string, sessionCwd: string) {
+  if (isStreaming.value) {
+    await stopExecution()
+  }
   cwd.value = sessionCwd
   fetchSessionsForPath(sessionCwd)
   const encoded = sessionCwd.replace(/\//g, '-')
