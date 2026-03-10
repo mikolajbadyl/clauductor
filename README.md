@@ -40,9 +40,17 @@ clauductor
 
 # Custom host and port
 clauductor --host 0.0.0.0 --port 3003
+
+# Service management (Linux only)
+clauductor service install --host=0.0.0.0 --port=3003  # Install systemd user service
+clauductor service enable    # Enable autostart on login
+clauductor service start     # Start the service
+clauductor service stop     # Stop the service
+clauductor service restart  # Restart the service
+clauductor service status   # Show service status
 ```
 
-Open `http://localhost:8080` in your browser.
+Open `http://localhost:8080` (or your configured port) in your browser.
 
 ## MCP server
 

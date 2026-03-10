@@ -69,7 +69,14 @@ function startResize(e: MouseEvent) {
 
 watch(showGraph, (v) => { if (!v) mobileNodeDetail.value = null })
 
-watch(cwd, (path) => { if (path) fetchSessionsForPath(path) })
+watch(cwd, (path, oldPath) => {
+  if (path) {
+    fetchSessionsForPath(path)
+    if (oldPath && path !== oldPath) {
+      resetSession()
+    }
+  }
+})
 
 function handleLoadSession(sessionId: string) {
   const encoded = cwd.value.replace(/\//g, '-')

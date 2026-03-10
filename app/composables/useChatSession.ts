@@ -479,10 +479,14 @@ export function useChatSession() {
     }
 
     try {
+      const body: Record<string, any> = { clientId: clientId.value }
+      if (conversationId.value) {
+        body.sessionId = conversationId.value
+      }
       await fetch(backendUrl('/stop'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId: clientId.value }),
+        body: JSON.stringify(body),
       })
     } catch (err: any) {
       console.error('Stop error:', err)

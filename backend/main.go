@@ -53,6 +53,11 @@ func generateID() string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		runServiceCommand(os.Args[2:])
+		return
+	}
+
 	host := flag.String("host", "localhost", "Host to bind to (use 0.0.0.0 for all interfaces)")
 	port := flag.String("port", "8080", "Port to listen on")
 	mcpMode := flag.Bool("mcp", false, "Run as MCP stdio server (for Claude MCP integration)")
@@ -79,6 +84,7 @@ func main() {
 	r.GET("/projects/:encoded/sessions", sessionsHandler)
 	r.GET("/projects/:encoded/sessions/:id", sessionHandler)
 	r.POST("/api/sessions/:id/claim", sessionClaimHandler)
+	r.GET("/api/sessions/:id/pending-permissions", pendingPermissionsHandler)
 	r.GET("/api/version", func(c *gin.Context) {
 		c.JSON(200, gin.H{"version": buildVersion})
 	})
@@ -91,6 +97,10 @@ func main() {
 	r.PUT("/api/profiles/active", setActiveProfileHandler)
 	r.GET("/api/prefs", getPrefsHandler)
 	r.PUT("/api/prefs", savePrefsHandler)
+	r.GET("/api/files", listFilesHandler)
+	r.POST("/api/upload", uploadFileHandler)
+	r.GET("/api/project-settings", getProjectSettingsHandler)
+	r.POST("/api/project-settings", saveProjectSettingsHandler)
 
 	frontendFS, err := fs.Sub(frontendFiles, "frontend")
 	if err != nil {

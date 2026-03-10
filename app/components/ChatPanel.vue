@@ -55,6 +55,15 @@ const convInputRef = ref<HTMLInputElement | null>(null)
 
 const activeSessionsOpen = ref(false)
 
+const projectSettingsOpen = ref(false)
+const projectSettings = ref({
+  claudeMd: '',
+  settingsJson: '',
+})
+const projectSettingsLoading = ref(false)
+const projectSettingsSaving = ref(false)
+const settingsTab = ref<'claudemd' | 'settings'>('claudemd')
+
 const expandedTools = ref(new Set<string>())
 const collapsedByUser = ref(new Set<string>())
 
@@ -81,6 +90,36 @@ function expandTool(toolId: string) {
 function formatBashOutput(output: string): string {
   if (!output) return ''
   return output.replace(/^[\s\n]*/, '').slice(0, 2000)
+}
+
+function parseSearchLinks(result: string): { query: string; links: Array<{ title: string; url: string }> } {
+  if (!result) return { query: '', links: [] }
+
+  let query = ''
+  let links: Array<{ title: string; url: string }> = []
+
+  const queryMatch = result.match(/Web search results for query:\s*"([^"]+)"/)
+  if (queryMatch?.[1]) query = queryMatch[1]
+
+  const linksIdx = result.indexOf('Links:')
+  if (linksIdx !== -1) {
+    const afterLinks = result.slice(linksIdx + 6).trim()
+    const bracketStart = afterLinks.indexOf('[')
+    if (bracketStart !== -1) {
+      let depth = 0
+      let end = -1
+      for (let i = bracketStart; i < afterLinks.length; i++) {
+        if (afterLinks[i] === '[') depth++
+        else if (afterLinks[i] === ']') { depth--; if (depth === 0) { end = i; break } }
+      }
+      if (end !== -1) {
+        const jsonStr = afterLinks.slice(bracketStart, end + 1)
+        try { links = JSON.parse(jsonStr) } catch {}
+      }
+    }
+  }
+
+  return { query, links }
 }
 
 const usageOpen = ref(false)
@@ -348,6 +387,58 @@ function selectModel(value: string) {
   modelDropdownOpen.value = false
 }
 
+async function loadProjectSettings() {
+  if (!cwd.value) return
+
+  projectSettingsLoading.value = true
+  try {
+    const encodedPath = encodeURIComponent(cwd.value)
+    const res = await fetch(backendUrl(`/api/project-settings?path=${encodedPath}`))
+    if (res.ok) {
+      const data = await res.json()
+      projectSettings.value.claudeMd = data.claudeMd || ''
+      projectSettings.value.settingsJson = data.settingsJson || ''
+    }
+  } catch (e) {
+    console.error('Failed to load project settings', e)
+  } finally {
+    projectSettingsLoading.value = false
+  }
+}
+
+async function saveProjectSettings() {
+  if (!cwd.value) return
+
+  projectSettingsSaving.value = true
+  try {
+    const encodedPath = encodeURIComponent(cwd.value)
+    const res = await fetch(backendUrl(`/api/project-settings?path=${encodedPath}`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        claudeMd: projectSettings.value.claudeMd,
+        settingsJson: projectSettings.value.settingsJson,
+      }),
+    })
+    if (res.ok) {
+      projectSettingsOpen.value = false
+    } else {
+      alert('Failed to save project settings')
+    }
+  } catch (e) {
+    console.error('Failed to save project settings', e)
+    alert('Failed to save project settings')
+  } finally {
+    projectSettingsSaving.value = false
+  }
+}
+
+watch(projectSettingsOpen, (open) => {
+  if (open) {
+    loadProjectSettings()
+  }
+})
+
 onMounted(() => {
   fetchProfiles()
 })
@@ -391,7 +482,95 @@ const planContent = computed(() => {
 
 const planExpanded = ref(false)
 
-const canSubmit = computed(() => prompt.value.trim() && cwd.value.trim() && !pathNotFound.value)
+// @ mention state
+const atMentionOpen = ref(false)
+const atMentionFiles = ref<{ name: string; path: string; isDir: boolean }[]>([])
+const atMentionQuery = ref('')
+const atMentionStart = ref(0)
+const atMentionSelectedIdx = ref(0)
+
+async function fetchAtMentionFiles(query: string) {
+  if (!cwd.value) return
+  try {
+    const res = await fetch(backendUrl(`/api/files?path=${encodeURIComponent(cwd.value)}&query=${encodeURIComponent(query)}`))
+    if (res.ok) {
+      atMentionFiles.value = await res.json()
+      atMentionSelectedIdx.value = 0
+    }
+  } catch {
+    atMentionFiles.value = []
+  }
+}
+
+function handlePromptInput() {
+  const ta = promptInputRef.value
+  if (!ta) return
+  const pos = ta.selectionStart ?? 0
+  const before = prompt.value.slice(0, pos)
+  const match = before.match(/@([^\s@]*)$/)
+  if (match) {
+    atMentionStart.value = pos - match[0].length
+    atMentionQuery.value = match[1]
+    atMentionOpen.value = true
+    fetchAtMentionFiles(match[1])
+  } else {
+    atMentionOpen.value = false
+  }
+}
+
+function selectAtMentionFile(file: { name: string; path: string }) {
+  const ta = promptInputRef.value
+  if (!ta) return
+  const pos = ta.selectionStart ?? prompt.value.length
+  const before = prompt.value.slice(0, atMentionStart.value)
+  const after = prompt.value.slice(pos)
+  const inserted = '@' + file.path + ' '
+  prompt.value = before + inserted + after
+  atMentionOpen.value = false
+  nextTick(() => {
+    const newPos = before.length + inserted.length
+    ta.setSelectionRange(newPos, newPos)
+    ta.focus()
+  })
+}
+
+// File upload state
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const attachedFiles = ref<{ name: string; path: string }[]>([])
+const uploadingFile = ref(false)
+
+async function handleFileUpload(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingFile.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await fetch(backendUrl('/api/upload'), { method: 'POST', body: formData })
+    if (res.ok) {
+      const data = await res.json()
+      attachedFiles.value.push({ name: file.name, path: data.path })
+    }
+  } catch (err) {
+    console.error('Upload failed', err)
+  } finally {
+    uploadingFile.value = false
+    input.value = ''
+  }
+}
+
+function removeAttachedFile(idx: number) {
+  attachedFiles.value.splice(idx, 1)
+}
+
+function closeAtMentionDelayed() {
+  window.setTimeout(() => { atMentionOpen.value = false }, 150)
+}
+
+const canSubmit = computed(() =>
+  (prompt.value.trim() || attachedFiles.value.length > 0) && cwd.value.trim() && !pathNotFound.value,
+)
 
 function onSubmit() {
   if (!cwd.value.trim() || pathNotFound.value) {
@@ -400,18 +579,46 @@ function onSubmit() {
   }
   cwdError.value = false
   if (canSubmit.value) {
+    let finalPrompt = prompt.value.trim()
+    if (attachedFiles.value.length > 0) {
+      const refs = attachedFiles.value.map(f => `@${f.path}`).join(' ')
+      finalPrompt = refs + (finalPrompt ? '\n' + finalPrompt : '')
+    }
     emit('submit', {
-      prompt: prompt.value.trim(),
+      prompt: finalPrompt,
       cwd: cwd.value.trim(),
       model: props.activeModel,
       mode: props.activeMode,
       permissionStyle: props.permissionStyle,
     })
     prompt.value = ''
+    attachedFiles.value = []
   }
 }
 
 function handleEnterKey(e: KeyboardEvent) {
+  if (atMentionOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      atMentionSelectedIdx.value = Math.min(atMentionSelectedIdx.value + 1, atMentionFiles.value.length - 1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      atMentionSelectedIdx.value = Math.max(0, atMentionSelectedIdx.value - 1)
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      const file = atMentionFiles.value[atMentionSelectedIdx.value]
+      if (file) selectAtMentionFile(file)
+      return
+    }
+    if (e.key === 'Escape') {
+      atMentionOpen.value = false
+      return
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     if (!props.isStreaming) {
@@ -788,31 +995,124 @@ watch(() => props.messages, async () => {
                     </div>
                   </div>
 
-                  <div v-if="tool.status === 'done' && isToolExpanded(tool.id)" class="border-t border-black/5 dark:border-white/5 max-h-24 overflow-y-auto">
-                      <div v-if="tool.name === 'Edit' && (tool.input?.old_string || tool.input?.new_string)" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto">
-                        <div v-if="tool.input?.old_string" class="text-rose-400/80 mb-1">--- {{ tool.input.file_path }}</div>
-                        <div v-if="tool.input?.new_string" class="text-emerald-400/80">+++ {{ tool.input.file_path }}</div>
-                        <div class="mt-2 space-y-0.5">
-                          <div v-for="(line, i) in (tool.input.old_string || '').split('\n')" :key="'old-'+i" class="text-rose-400/70">- {{ line }}</div>
-                          <div v-for="(line, i) in (tool.input.new_string || '').split('\n')" :key="'new-'+i" class="text-emerald-400/70">+ {{ line }}</div>
+                  <div v-if="tool.status === 'done' && isToolExpanded(tool.id)" class="border-t border-black/5 dark:border-white/5">
+                      <div v-if="tool.name === 'Edit' && (tool.input?.old_string || tool.input?.new_string)" class="bg-slate-900/50 dark:bg-slate-950/50 overflow-hidden">
+                        <div class="px-3 py-2 bg-slate-800/50 border-b border-white/5 flex items-center gap-2">
+                          <UIcon name="i-lucide-file-diff" class="w-3.5 h-3.5 text-emerald-400" />
+                          <span class="text-[11px] font-mono text-slate-300">{{ tool.input.file_path }}</span>
+                        </div>
+                        <div class="max-h-48 overflow-y-auto">
+                          <div class="flex">
+                            <div class="sticky left-0 bg-slate-900/90 backdrop-blur-sm border-r border-white/5 z-10">
+                              <div v-for="(line, i) in (tool.input.old_string || '').split('\n')" :key="'old-num-'+i" class="px-2 py-0.5 text-rose-500/50 text-[11px] font-mono text-right select-none min-w-[3rem]">
+                                {{ i + 1 }}
+                              </div>
+                              <div v-for="(line, i) in (tool.input.new_string || '').split('\n')" :key="'new-num-'+i" class="px-2 py-0.5 text-emerald-500/50 text-[11px] font-mono text-right select-none min-w-[3rem]">
+                                {{ i + 1 }}
+                              </div>
+                            </div>
+                            <div class="flex-1 overflow-x-auto">
+                              <div v-for="(line, i) in (tool.input.old_string || '').split('\n')" :key="'old-'+i" class="px-2 py-0.5 text-[11px] font-mono hover:bg-rose-500/5">
+                                <span class="text-rose-400/80 bg-rose-500/10 px-1 rounded whitespace-pre">{{ line || ' ' }}</span>
+                              </div>
+                              <div v-for="(line, i) in (tool.input.new_string || '').split('\n')" :key="'new-'+i" class="px-2 py-0.5 text-[11px] font-mono hover:bg-emerald-500/5">
+                                <span class="text-emerald-400/80 bg-emerald-500/10 px-1 rounded whitespace-pre">{{ line || ' ' }}</span>
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       </div>
 
-                      <div v-else-if="tool.name === 'Write' && tool.input?.content" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto">
-                        <div class="text-sky-400/80 mb-1">+++ {{ tool.input.file_path }}</div>
-                        <pre class="text-slate-300 whitespace-pre-wrap">{{ tool.input.content.slice(0, 1000) }}{{ tool.input.content.length > 1000 ? '\n... (truncated)' : '' }}</pre>
+                      <div v-else-if="tool.name === 'Write' && tool.input?.content" class="bg-slate-900/50 dark:bg-slate-950/50 overflow-hidden">
+                        <div class="px-3 py-2 bg-slate-800/50 border-b border-white/5 flex items-center gap-2">
+                          <UIcon name="i-lucide-file-plus" class="w-3.5 h-3.5 text-emerald-400" />
+                          <span class="text-[11px] font-mono text-slate-300">{{ tool.input.file_path }}</span>
+                          <span class="ml-auto text-[10px] text-emerald-400">{{ tool.input.content.split('\n').length }} lines</span>
+                        </div>
+                        <div class="max-h-48 overflow-y-auto">
+                          <div class="flex">
+                            <div class="sticky left-0 bg-slate-900/90 backdrop-blur-sm border-r border-white/5 z-10">
+                              <div v-for="(line, i) in tool.input.content.split('\n').slice(0, 100)" :key="'num-'+i" class="px-2 py-0.5 text-slate-500 text-[11px] font-mono text-right select-none min-w-[3rem]">
+                                {{ i + 1 }}
+                              </div>
+                            </div>
+                            <div class="flex-1 overflow-x-auto">
+                              <div v-for="(line, i) in tool.input.content.split('\n').slice(0, 100)" :key="i" class="px-2 py-0.5 text-[11px] font-mono hover:bg-emerald-500/5">
+                                <span class="text-slate-300 whitespace-pre">{{ line || ' ' }}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div v-if="tool.input.content.split('\n').length > 100" class="text-slate-500 text-center py-2 italic text-xs border-t border-white/5">
+                            ... {{ tool.input.content.split('\n').length - 100 }} more lines
+                          </div>
+                        </div>
                       </div>
 
-                      <div v-else-if="tool.name === 'Bash' && tool.result" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto">
-                        <pre class="text-slate-300 whitespace-pre-wrap">{{ formatBashOutput(tool.result) }}</pre>
+                      <div v-else-if="tool.name === 'WebSearch' && tool.result" class="bg-gradient-to-br from-amber-500/5 to-orange-500/5">
+                        <div class="px-3 py-2.5 border-b border-amber-500/10">
+                          <div class="flex items-center gap-2 text-[11px]">
+                            <UIcon name="i-lucide-search" class="w-3.5 h-3.5 text-amber-400" />
+                            <span class="text-amber-400 font-medium">{{ parseSearchLinks(tool.result).query || tool.input?.query || 'Search Results' }}</span>
+                            <span class="ml-auto text-slate-500">{{ parseSearchLinks(tool.result).links.length }} results</span>
+                          </div>
+                        </div>
+                        <div class="p-3 space-y-2 max-h-60 overflow-y-auto">
+                          <a
+                            v-for="(link, idx) in parseSearchLinks(tool.result).links"
+                            :key="idx"
+                            :href="link.url"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="block p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-border/30 hover:border-amber-500/30 hover:bg-amber-500/5 transition-all group"
+                          >
+                            <div class="flex items-start gap-2">
+                              <UIcon name="i-lucide-external-link" class="w-3.5 h-3.5 text-slate-400 group-hover:text-amber-400 shrink-0 mt-0.5" />
+                              <div class="flex-1 min-w-0">
+                                <div class="text-xs font-medium text-slate-700 dark:text-slate-200 group-hover:text-amber-400 truncate">{{ link.title }}</div>
+                                <div class="text-[10px] text-slate-500 truncate font-mono mt-0.5">{{ link.url }}</div>
+                              </div>
+                            </div>
+                          </a>
+                        </div>
                       </div>
 
-                      <div v-else-if="tool.name === 'Read' && tool.result" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto">
-                        <pre class="text-slate-300 whitespace-pre-wrap">{{ tool.result.slice(0, 1500) }}{{ tool.result.length > 1500 ? '\n... (truncated)' : '' }}</pre>
+                      <div v-else-if="tool.name === 'Bash' && tool.result" class="bg-slate-900/50 dark:bg-slate-950/50 overflow-hidden">
+                        <div class="px-3 py-2 bg-slate-800/50 border-b border-white/5 flex items-center gap-2">
+                          <UIcon name="i-lucide-terminal" class="w-3.5 h-3.5 text-violet-400" />
+                          <span class="text-[11px] font-mono text-violet-300">$ {{ tool.input?.command?.slice(0, 60) }}</span>
+                        </div>
+                        <div class="p-3 font-mono text-[11px] overflow-x-auto max-h-48 overflow-y-auto">
+                          <pre class="text-slate-300 whitespace-pre">{{ formatBashOutput(tool.result) }}</pre>
+                        </div>
                       </div>
 
-                      <div v-else-if="tool.result" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto">
-                        <pre class="text-slate-300 whitespace-pre-wrap">{{ typeof tool.result === 'string' ? tool.result.slice(0, 1500) : JSON.stringify(tool.result, null, 2).slice(0, 1500) }}</pre>
+                      <div v-else-if="tool.name === 'Read' && tool.result" class="bg-slate-900/50 dark:bg-slate-950/50 overflow-hidden">
+                        <div class="px-3 py-2 bg-slate-800/50 border-b border-white/5 flex items-center gap-2">
+                          <UIcon name="i-lucide-file-text" class="w-3.5 h-3.5 text-sky-400" />
+                          <span class="text-[11px] font-mono text-slate-300">{{ tool.input?.file_path }}</span>
+                          <span class="ml-auto text-[10px] text-slate-500">{{ tool.result.split('\n').length }} lines</span>
+                        </div>
+                        <div class="max-h-48 overflow-y-auto">
+                          <div class="flex">
+                            <div class="sticky left-0 bg-slate-900/90 backdrop-blur-sm border-r border-white/5 z-10">
+                              <div v-for="(line, i) in tool.result.split('\n').slice(0, 100)" :key="'num-'+i" class="px-2 py-0.5 text-slate-500 text-[11px] font-mono text-right select-none min-w-[3rem]">
+                                {{ i + 1 }}
+                              </div>
+                            </div>
+                            <div class="flex-1 overflow-x-auto">
+                              <div v-for="(line, i) in tool.result.split('\n').slice(0, 100)" :key="i" class="px-2 py-0.5 text-[11px] font-mono hover:bg-sky-500/5">
+                                <span class="text-slate-300 whitespace-pre">{{ line || ' ' }}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div v-if="tool.result.split('\n').length > 100" class="text-slate-500 text-center py-2 italic text-xs border-t border-white/5">
+                            ... {{ tool.result.split('\n').length - 100 }} more lines
+                          </div>
+                        </div>
+                      </div>
+
+                      <div v-else-if="tool.result" class="p-3 bg-slate-900/50 dark:bg-slate-950/50 font-mono text-[11px] overflow-x-auto max-h-48 overflow-y-auto">
+                        <pre class="text-slate-300 whitespace-pre">{{ typeof tool.result === 'string' ? tool.result.slice(0, 1500) : JSON.stringify(tool.result, null, 2).slice(0, 1500) }}</pre>
                       </div>
 
                       <div v-else class="p-3 text-slate-400 text-xs italic">
@@ -1042,24 +1342,6 @@ watch(() => props.messages, async () => {
 
     <div class="border-t border-border/40 bg-card/30 shrink-0 pb-[env(safe-area-inset-bottom)] relative">
 
-      <div
-        class="absolute top-0 left-0 right-0 transform -translate-y-full h-10 flex items-center px-6 pointer-events-none z-10 bg-gradient-to-t from-background/90 via-background/40 to-transparent"
-      >
-        <Transition name="fade-slide" mode="out-in">
-          <div v-if="isStreaming" class="flex items-center gap-3">
-            <div class="relative w-3.5 h-3.5">
-              <div class="absolute inset-0 border-2 border-sky-500/20 rounded-full"></div>
-              <div class="absolute inset-0 border-2 border-t-sky-500 rounded-full animate-spin"></div>
-            </div>
-            <Transition name="fade-slide" mode="out-in">
-              <span :key="activeTodoText ?? currentVerb" class="text-[11px] font-bold uppercase tracking-tight text-slate-500 italic drop-shadow-sm">
-                {{ activeTodoText ?? currentVerb }}...
-              </span>
-            </Transition>
-          </div>
-        </Transition>
-      </div>
-
       <Transition
         enter-active-class="transition-all duration-200 ease-out"
         enter-from-class="opacity-0 -translate-y-1 max-h-0"
@@ -1068,58 +1350,83 @@ watch(() => props.messages, async () => {
         leave-from-class="opacity-100 translate-y-0 max-h-80"
         leave-to-class="opacity-0 -translate-y-1 max-h-0"
       >
-        <div v-if="isStreaming && currentTodos.length > 0" class="border-b border-border/20">
+        <div v-if="isStreaming" class="border-b border-border/20">
           <div class="px-3 pt-2 pb-1.5 space-y-0.5 overflow-y-auto custom-scrollbar" style="max-height: 5.5rem">
-            <div
-              v-for="todo in sortedTodos"
-              :key="todo.content"
-              class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs transition-colors"
-              :class="todo.status === 'in_progress' ? 'bg-sky-500/8' : ''"
-            >
-              <UIcon
-                v-if="todo.status === 'completed'"
-                name="i-lucide-check-circle-2"
-                class="w-3.5 h-3.5 flex-shrink-0 text-emerald-500/70"
-              />
-              <div v-else class="w-3.5 h-3.5 flex-shrink-0 rounded-full border"
-                :class="todo.status === 'in_progress' ? 'border-sky-400/60' : 'border-slate-500/30'"
-              ></div>
-              <span
-                class="flex-1 truncate font-mono"
-                :class="todo.status === 'completed'
-                  ? 'text-slate-500 line-through'
-                  : todo.status === 'in_progress'
-                    ? 'text-sky-300'
-                    : 'text-slate-500'"
-              >{{ todo.status === 'in_progress' ? todo.activeForm : todo.content }}</span>
+            <template v-if="currentTodos.length > 0">
+              <div
+                v-for="todo in sortedTodos"
+                :key="todo.content"
+                class="flex items-center gap-2 px-2.5 py-1.5 text-xs transition-colors"
+              >
+                <div v-if="todo.status === 'in_progress'" class="relative w-3.5 h-3.5 flex-shrink-0">
+                  <div class="absolute inset-0 border-2 border-sky-500/20 rounded-full"></div>
+                  <div class="absolute inset-0 border-2 border-t-sky-500 rounded-full animate-spin"></div>
+                </div>
+                <UIcon
+                  v-else-if="todo.status === 'completed'"
+                  name="i-lucide-check-circle-2"
+                  class="w-3.5 h-3.5 flex-shrink-0 text-emerald-500/70"
+                />
+                <div v-else class="w-3.5 h-3.5 flex-shrink-0 rounded-full border border-slate-500/30"></div>
+                <span
+                  class="flex-1 truncate font-mono"
+                  :class="todo.status === 'completed'
+                    ? 'text-slate-500 line-through'
+                    : todo.status === 'in_progress'
+                      ? 'text-sky-300'
+                      : 'text-slate-500'"
+                >{{ todo.status === 'in_progress' ? todo.activeForm : todo.content }}</span>
+              </div>
+            </template>
+            <div v-else class="flex items-center gap-3 px-2.5 py-1.5">
+              <div class="relative w-3.5 h-3.5">
+                <div class="absolute inset-0 border-2 border-sky-500/20 rounded-full"></div>
+                <div class="absolute inset-0 border-2 border-t-sky-500 rounded-full animate-spin"></div>
+              </div>
+              <Transition name="fade-slide" mode="out-in">
+                <span :key="currentVerb" class="text-[11px] font-bold uppercase tracking-tight text-slate-500 italic">
+                  {{ currentVerb }}...
+                </span>
+              </Transition>
             </div>
           </div>
         </div>
       </Transition>
 
       <div class="px-3 sm:px-4 pt-3 pb-2 relative">
-        <button
-          @click="openCwdPicker"
-          class="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm sm:text-xs transition-colors border text-left group"
-          :class="cwdError || pathNotFound
-            ? 'bg-rose-500/5 border-rose-500/30'
-            : cwd ? 'bg-emerald-500/5 border-emerald-500/15' : 'bg-slate-50 dark:bg-slate-900/30 border-slate-200 dark:border-border/40'"
-        >
-          <UIcon
-            name="i-lucide-folder"
-            class="w-4 h-4 flex-shrink-0"
-            :class="cwdError || pathNotFound ? 'text-rose-400' : cwd ? 'text-emerald-400/70' : 'text-slate-400'"
-          />
-          <span class="flex-1 truncate" :class="cwd && !pathNotFound ? 'text-slate-600 dark:text-slate-300' : 'text-slate-400 dark:text-slate-600'">
-            {{ cwd || 'Select working directory...' }}
-          </span>
-          <button v-if="pathNotFound" @click.stop="handleCreateFolder" title="Create folder" class="flex items-center gap-1 text-rose-500 hover:text-rose-600 dark:text-rose-400 dark:hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 px-2 py-0.5 rounded-md transition-colors">
-            <UIcon name="i-lucide-folder-plus" class="w-3.5 h-3.5" />
-            <span class="text-[10px] font-medium uppercase tracking-wider">Create</span>
+        <div class="flex items-center gap-2">
+          <button
+            @click="openCwdPicker"
+            class="flex-1 flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm sm:text-xs transition-colors border text-left group"
+            :class="cwdError || pathNotFound
+              ? 'bg-rose-500/5 border-rose-500/30'
+              : cwd ? 'bg-emerald-500/5 border-emerald-500/15' : 'bg-slate-50 dark:bg-slate-900/30 border-slate-200 dark:border-border/40'"
+          >
+            <UIcon
+              name="i-lucide-folder"
+              class="w-4 h-4 flex-shrink-0"
+              :class="cwdError || pathNotFound ? 'text-rose-400' : cwd ? 'text-emerald-400/70' : 'text-slate-400'"
+            />
+            <span class="flex-1 truncate" :class="cwd && !pathNotFound ? 'text-slate-600 dark:text-slate-300' : 'text-slate-400 dark:text-slate-600'">
+              {{ cwd || 'Select working directory...' }}
+            </span>
+            <button v-if="pathNotFound" @click.stop="handleCreateFolder" title="Create folder" class="flex items-center gap-1 text-rose-500 hover:text-rose-600 dark:text-rose-400 dark:hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 px-2 py-0.5 rounded-md transition-colors">
+              <UIcon name="i-lucide-folder-plus" class="w-3.5 h-3.5" />
+              <span class="text-[10px] font-medium uppercase tracking-wider">Create</span>
+            </button>
+            <span v-else-if="cwdError" class="text-rose-400 flex-shrink-0 text-xs">required</span>
+            <UIcon v-else name="i-lucide-chevrons-up-down" class="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
           </button>
-          <span v-else-if="cwdError" class="text-rose-400 flex-shrink-0 text-xs">required</span>
-          <UIcon v-else name="i-lucide-chevrons-up-down" class="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-        </button>
+
+          <button
+            v-if="cwd && !pathNotFound"
+            @click="projectSettingsOpen = true"
+            title="Project settings"
+            class="w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-700 dark:hover:text-slate-100 transition-colors shrink-0 border border-slate-200 dark:border-border/40"
+          >
+            <UIcon name="i-lucide-settings" class="w-4 h-4" />
+          </button>
+        </div>
 
         <Transition
           enter-active-class="transition duration-150 ease-out"
@@ -1191,35 +1498,100 @@ watch(() => props.messages, async () => {
       </div>
 
       <div class="px-3 sm:px-4 pb-3 sm:pb-4 pt-1 space-y-2">
-        <div class="relative">
+        <div v-if="attachedFiles.length > 0" class="flex flex-wrap gap-1.5">
+          <div
+            v-for="(file, idx) in attachedFiles"
+            :key="idx"
+            class="flex items-center gap-1.5 bg-sky-500/10 border border-sky-500/20 text-sky-300 rounded-lg px-2.5 py-1 text-xs font-mono"
+          >
+            <UIcon name="i-lucide-paperclip" class="w-3 h-3 flex-shrink-0" />
+            <span class="truncate max-w-[8rem]">{{ file.name }}</span>
+            <button @click="removeAttachedFile(idx)" class="hover:text-rose-400 transition-colors ml-0.5">
+              <UIcon name="i-lucide-x" class="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+
+        <div class="relative flex items-end gap-2">
+          <!-- @ mention dropdown -->
+          <div
+            v-if="atMentionOpen && atMentionFiles.length > 0"
+            class="absolute bottom-full left-0 right-12 mb-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-border/40 rounded-xl shadow-xl z-50 overflow-hidden max-h-60 flex flex-col"
+          >
+            <div class="px-3 py-1.5 border-b border-border/20 flex items-center gap-2 shrink-0">
+              <UIcon name="i-lucide-at-sign" class="w-3.5 h-3.5 text-slate-500" />
+              <span class="text-[10px] text-slate-500 font-mono">{{ atMentionQuery || 'files' }}</span>
+            </div>
+            <div class="overflow-y-auto">
+              <button
+                v-for="(file, idx) in atMentionFiles"
+                :key="file.path"
+                @mousedown.prevent="selectAtMentionFile(file)"
+                class="w-full flex items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
+                :class="idx === atMentionSelectedIdx
+                  ? 'bg-sky-500/10 text-sky-300'
+                  : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300'"
+              >
+                <UIcon
+                  :name="file.isDir ? 'i-lucide-folder' : 'i-lucide-file'"
+                  class="w-3.5 h-3.5 flex-shrink-0"
+                  :class="idx === atMentionSelectedIdx ? 'text-sky-400' : 'text-slate-400'"
+                />
+                <span class="font-mono truncate">{{ file.name }}</span>
+              </button>
+            </div>
+          </div>
+
           <textarea
             ref="promptInputRef"
             v-model="prompt"
-            :placeholder="cwd ? 'Ask Claude anything... (Enter to send, Shift+Enter for new line)' : 'Set a working directory first...'"
+            :placeholder="cwd ? 'Ask Claude anything... (@file to reference, Enter to send)' : 'Set a working directory first...'"
             rows="2"
-            class="w-full px-4 py-3 pr-16 pb-3 resize-none rounded-xl bg-card/50 border border-border/40 focus:border-sky-500/40 focus:ring-sky-500/10 text-sm sm:text-sm max-h-48 overflow-y-auto outline-none custom-scrollbar"
+            class="flex-1 px-4 py-3 resize-none rounded-xl bg-card/50 border border-border/40 focus:border-sky-500/40 focus:ring-sky-500/10 text-sm max-h-48 min-h-[5.5rem] overflow-y-auto outline-none custom-scrollbar"
             @keydown="handleEnterKey"
+            @input="handlePromptInput"
+            @blur="closeAtMentionDelayed()"
           />
-          <button
-            v-if="isStreaming"
-            type="button"
-            @click="emit('stop')"
-            class="absolute right-3 bottom-3 w-9 h-9 sm:w-8 sm:h-8 rounded-lg flex items-center justify-center transition-all bg-rose-500 text-white hover:bg-rose-400 shadow-sm shadow-rose-500/20"
-          >
-            <UIcon name="i-lucide-square" class="w-4 h-4" />
-          </button>
-          <button
-            v-else
-            type="button"
-            :disabled="!canSubmit"
-            @click="onSubmit"
-            class="absolute right-3 bottom-3 w-9 h-9 sm:w-8 sm:h-8 rounded-lg flex items-center justify-center transition-all"
-            :class="canSubmit
-              ? 'bg-sky-500 text-white hover:bg-sky-400 shadow-sm shadow-sky-500/20'
-              : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'"
-          >
-            <UIcon name="i-lucide-arrow-up" class="w-4 h-4" />
-          </button>
+
+          <input ref="fileInputRef" type="file" class="hidden" @change="handleFileUpload" />
+          <div class="flex flex-col gap-1.5 pb-3 shrink-0">
+            <button
+              type="button"
+              @click="fileInputRef?.click()"
+              :disabled="uploadingFile"
+              class="w-8 h-8 rounded-lg flex items-center justify-center transition-all border"
+              :class="uploadingFile
+                ? 'border-border/30 text-slate-400'
+                : 'border-sky-500/40 text-sky-400 hover:bg-sky-500/10 hover:border-sky-500/70'"
+              title="Attach file"
+            >
+              <UIcon
+                :name="uploadingFile ? 'i-lucide-loader-2' : 'i-lucide-plus'"
+                class="w-4 h-4"
+                :class="uploadingFile ? 'animate-spin' : ''"
+              />
+            </button>
+            <button
+              v-if="isStreaming"
+              type="button"
+              @click="emit('stop')"
+              class="w-8 h-8 rounded-lg flex items-center justify-center transition-all bg-rose-500 text-white hover:bg-rose-400 shadow-sm shadow-rose-500/20"
+            >
+              <UIcon name="i-lucide-square" class="w-4 h-4" />
+            </button>
+            <button
+              v-else
+              type="button"
+              :disabled="!canSubmit"
+              @click="onSubmit"
+              class="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
+              :class="canSubmit
+                ? 'bg-sky-500 text-white hover:bg-sky-400 shadow-sm shadow-sky-500/20'
+                : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'"
+            >
+              <UIcon name="i-lucide-arrow-up" class="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         <div class="flex items-center justify-between px-1">
@@ -1344,6 +1716,150 @@ watch(() => props.messages, async () => {
         </div>
       </div>
     </div>
+
+    <!-- Project Settings Modal -->
+    <Transition
+      enter-active-class="transition-all duration-200 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition-all duration-150 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="projectSettingsOpen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" @click.self="projectSettingsOpen = false">
+        <div class="w-full max-w-4xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-border/40 overflow-hidden flex flex-col max-h-[85vh]">
+          <!-- Header -->
+          <div class="px-6 py-4 border-b border-slate-200 dark:border-border/30 flex items-center justify-between shrink-0">
+            <div class="flex items-center gap-3">
+              <UIcon name="i-lucide-settings" class="w-5 h-5 text-sky-500" />
+              <div>
+                <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Project Settings</h2>
+                <p class="text-xs text-slate-500 dark:text-slate-400 font-mono truncate max-w-md">{{ cwd }}</p>
+              </div>
+            </div>
+            <button @click="projectSettingsOpen = false" class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+              <UIcon name="i-lucide-x" class="w-5 h-5" />
+            </button>
+          </div>
+
+          <!-- Tabs -->
+          <div class="px-6 pt-3 border-b border-slate-200 dark:border-border/20 flex gap-2 shrink-0">
+            <button
+              @click="settingsTab = 'claudemd'"
+              class="px-4 py-2 text-sm font-medium rounded-t-lg transition-all"
+              :class="settingsTab === 'claudemd'
+                ? 'bg-sky-500/10 text-sky-400 border-b-2 border-sky-500'
+                : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'"
+            >
+              <div class="flex items-center gap-2">
+                <UIcon name="i-lucide-file-text" class="w-4 h-4" />
+                CLAUDE.md
+              </div>
+            </button>
+            <button
+              @click="settingsTab = 'settings'"
+              class="px-4 py-2 text-sm font-medium rounded-t-lg transition-all"
+              :class="settingsTab === 'settings'
+                ? 'bg-sky-500/10 text-sky-400 border-b-2 border-sky-500'
+                : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'"
+            >
+              <div class="flex items-center gap-2">
+                <UIcon name="i-lucide-braces" class="w-4 h-4" />
+                .claude/settings.json
+              </div>
+            </button>
+          </div>
+
+          <!-- Content -->
+          <div v-if="projectSettingsLoading" class="flex-1 flex items-center justify-center py-12">
+            <UIcon name="i-lucide-loader-circle" class="w-8 h-8 text-sky-500 animate-spin" />
+          </div>
+          <div v-else class="flex-1 overflow-y-auto p-6">
+            <!-- CLAUDE.md Tab -->
+            <div v-if="settingsTab === 'claudemd'" class="space-y-4">
+              <div class="bg-sky-500/5 border border-sky-500/20 rounded-xl p-4 text-sm">
+                <div class="flex items-start gap-3">
+                  <UIcon name="i-lucide-info" class="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+                  <div class="space-y-2">
+                    <p class="text-slate-700 dark:text-slate-200 font-medium">System Prompt for this Project</p>
+                    <p class="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
+                      CLAUDE.md contains instructions that Claude loads at startup for this project.
+                      Use it to define coding standards, architectural decisions, and project-specific context.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <textarea
+                v-model="projectSettings.claudeMd"
+                placeholder="# Project Instructions
+
+Example:
+- Use TypeScript strict mode
+- Follow Vue 3 Composition API patterns
+- All API calls should use the backendUrl helper"
+                class="w-full h-96 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-border/40 focus:border-sky-500/40 focus:ring-sky-500/10 text-sm font-mono resize-none outline-none"
+              />
+            </div>
+
+            <!-- settings.json Tab -->
+            <div v-if="settingsTab === 'settings'" class="space-y-4">
+              <div class="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-sm">
+                <div class="flex items-start gap-3">
+                  <UIcon name="i-lucide-alert-triangle" class="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <div class="space-y-2">
+                    <p class="text-slate-700 dark:text-slate-200 font-medium">Project Configuration (JSON)</p>
+                    <p class="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
+                      Configure permissions, environment variables, model defaults, and tool behavior.
+                      This file should be committed to version control. Use .claude/settings.local.json for secrets.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <textarea
+                v-model="projectSettings.settingsJson"
+                placeholder='{
+  "model": "sonnet",
+  "cleanupPeriodDays": 30,
+  "respectGitignore": true,
+  "permissions": {
+    "allow": [],
+    "deny": ["Read(**/.env)"],
+    "ask": []
+  },
+  "env": {
+    "NODE_ENV": "development"
+  }
+}'
+                class="w-full h-96 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-border/40 focus:border-sky-500/40 focus:ring-sky-500/10 text-sm font-mono resize-none outline-none"
+              />
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="px-6 py-4 border-t border-slate-200 dark:border-border/30 flex items-center justify-between shrink-0">
+            <a
+              href="https://code.claude.com/docs/en/settings"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-xs text-sky-400 hover:text-sky-300 flex items-center gap-1"
+            >
+              <UIcon name="i-lucide-external-link" class="w-3.5 h-3.5" />
+              Documentation
+            </a>
+            <div class="flex gap-3">
+              <UButton color="gray" variant="outline" @click="projectSettingsOpen = false">Cancel</UButton>
+              <UButton
+                color="sky"
+                :loading="projectSettingsSaving"
+                @click="saveProjectSettings"
+              >
+                Save Settings
+              </UButton>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 

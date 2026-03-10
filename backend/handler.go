@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +28,11 @@ var runningProcesses = struct {
 }{m: make(map[string]*exec.Cmd)}
 
 var sessionRunClients = struct {
+	sync.RWMutex
+	m map[string]string
+}{m: make(map[string]string)}
+
+var clientToSession = struct {
 	sync.RWMutex
 	m map[string]string
 }{m: make(map[string]string)}
@@ -130,6 +137,7 @@ func setActiveProfileHandler(c *gin.Context) {
 
 type PermissionReq struct {
 	ID           string         `json:"id"`
+	SessionID    string         `json:"sessionId"`
 	ClientID     string         `json:"clientId"`
 	ToolName     string         `json:"toolName"`
 	ToolInput    map[string]any `json:"toolInput"`
@@ -141,7 +149,7 @@ type PermissionReq struct {
 }
 
 var permissionStore = struct {
-	sync.Mutex
+	sync.RWMutex
 	m map[string]*PermissionReq
 }{m: make(map[string]*PermissionReq)}
 
@@ -211,6 +219,9 @@ func executeClaude(req RunRequest) {
 		sessionRunClients.Lock()
 		sessionRunClients.m[activeSessionId] = req.ClientID
 		sessionRunClients.Unlock()
+		clientToSession.Lock()
+		clientToSession.m[req.ClientID] = activeSessionId
+		clientToSession.Unlock()
 		sessionMetaStore.Lock()
 		sessionMetaStore.m[activeSessionId] = SessionMeta{SessionID: activeSessionId, CWD: req.Cwd, StartedAt: time.Now()}
 		sessionMetaStore.Unlock()
@@ -248,7 +259,7 @@ func executeClaude(req RunRequest) {
 	}
 	log.Printf("[Claude] Using binary: %s", command)
 
-	yolo := req.PermissionStyle == "yolo"
+	isPlan := req.Mode == "plan"
 
 	args := []string{
 		"-p", req.Prompt,
@@ -257,13 +268,13 @@ func executeClaude(req RunRequest) {
 		"--verbose",
 	}
 
-	if yolo {
+	if req.PermissionStyle == "yolo" && !isPlan {
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
 		args = append(args, "--permission-prompt-tool", "mcp__clauductor-mcp__approval_prompt")
 	}
 
-	if req.Mode == "plan" {
+	if isPlan {
 		args = append(args, "--permission-mode", "plan")
 	}
 
@@ -328,6 +339,9 @@ func executeClaude(req RunRequest) {
 			sessionRunClients.Lock()
 			delete(sessionRunClients.m, activeSessionId)
 			sessionRunClients.Unlock()
+			clientToSession.Lock()
+			delete(clientToSession.m, req.ClientID)
+			clientToSession.Unlock()
 			sessionMetaStore.Lock()
 			delete(sessionMetaStore.m, activeSessionId)
 			sessionMetaStore.Unlock()
@@ -366,6 +380,9 @@ func executeClaude(req RunRequest) {
 						sessionRunClients.Lock()
 						sessionRunClients.m[activeSessionId] = req.ClientID
 						sessionRunClients.Unlock()
+						clientToSession.Lock()
+						clientToSession.m[req.ClientID] = activeSessionId
+						clientToSession.Unlock()
 						sessionMetaStore.Lock()
 						sessionMetaStore.m[activeSessionId] = SessionMeta{SessionID: activeSessionId, CWD: req.Cwd, StartedAt: time.Now()}
 						sessionMetaStore.Unlock()
@@ -403,8 +420,17 @@ func permissionNotifyHandler(c *gin.Context) {
 	b := make([]byte, 16)
 	rand.Read(b)
 	reqID := fmt.Sprintf("%x", b)
+	// Get sessionID from clientID
+	var sessionID string
+	clientToSession.RLock()
+	if sid, ok := clientToSession.m[body.ClientID]; ok {
+		sessionID = sid
+	}
+	clientToSession.RUnlock()
+
 	perm := &PermissionReq{
 		ID:        reqID,
+		SessionID: sessionID,
 		ClientID:  body.ClientID,
 		ToolName:  body.ToolName,
 		ToolInput: body.ToolInput,
@@ -497,15 +523,28 @@ func permissionDecideHandler(c *gin.Context) {
 
 func stopHandler(c *gin.Context) {
 	var body struct {
-		ClientID string `json:"clientId"`
+		ClientID  string `json:"clientId"`
+		SessionID string `json:"sessionId"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.ClientID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "clientId required"})
 		return
 	}
 
+	targetClientID := body.ClientID
+
+	// If sessionId is provided, find the actual client that's running this session
+	if body.SessionID != "" {
+		sessionRunClients.RLock()
+		if actualClient, ok := sessionRunClients.m[body.SessionID]; ok {
+			targetClientID = actualClient
+			log.Printf("[Stop] Resolved sessionId %s to client %s", body.SessionID, actualClient)
+		}
+		sessionRunClients.RUnlock()
+	}
+
 	runningProcesses.Lock()
-	cmd, ok := runningProcesses.m[body.ClientID]
+	cmd, ok := runningProcesses.m[targetClientID]
 	runningProcesses.Unlock()
 
 	if !ok || cmd.Process == nil {
@@ -513,7 +552,7 @@ func stopHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[Stop] Sending SIGINT to process %d for client %s", cmd.Process.Pid, body.ClientID)
+	log.Printf("[Stop] Sending SIGINT to process %d for client %s", cmd.Process.Pid, targetClientID)
 	cmd.Process.Signal(os.Interrupt)
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 }
@@ -567,7 +606,48 @@ func sessionClaimHandler(c *gin.Context) {
 	}
 	sessionRunClients.Unlock()
 
+	clientToSession.Lock()
+	clientToSession.m[body.ClientID] = sessionId
+	clientToSession.Unlock()
+
+	// Send any pending permissions to the new client
+	if isActive {
+		permissionStore.RLock()
+		for _, p := range permissionStore.m {
+			if p.SessionID == sessionId && p.Status == "pending" {
+				manager.Send(body.ClientID, Message{
+					Type: "permission_request",
+					Data: map[string]any{
+						"requestId": p.ID,
+						"toolName":  p.ToolName,
+						"toolInput": p.ToolInput,
+					},
+				})
+			}
+		}
+		permissionStore.RUnlock()
+	}
+
 	c.JSON(http.StatusOK, gin.H{"active": isActive})
+}
+
+func pendingPermissionsHandler(c *gin.Context) {
+	sessionId := c.Param("id")
+
+	permissionStore.RLock()
+	var pending []gin.H
+	for _, p := range permissionStore.m {
+		if p.SessionID == sessionId && p.Status == "pending" {
+			pending = append(pending, gin.H{
+				"requestId": p.ID,
+				"toolName":  p.ToolName,
+				"toolInput": p.ToolInput,
+			})
+		}
+	}
+	permissionStore.RUnlock()
+
+	c.JSON(http.StatusOK, gin.H{"permissions": pending})
 }
 
 func getConfigHandler(c *gin.Context) {
@@ -702,8 +782,10 @@ func activeSessionsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+const claudeBinary = "/usr/local/bin/claude"
+
 func claudeVersionHandler(c *gin.Context) {
-	out, err := exec.Command("claude", "-v").Output()
+	out, err := exec.Command(claudeBinary, "-v").Output()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -718,7 +800,7 @@ func claudeUpdateHandler(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	pr, pw := io.Pipe()
-	cmd := exec.Command("claude", "update")
+	cmd := exec.Command(claudeBinary, "update")
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
@@ -853,4 +935,170 @@ func usageHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+type FileEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+var errWalkLimit = errors.New("limit")
+
+func listFilesHandler(c *gin.Context) {
+	dir := c.Query("path")
+	query := strings.ToLower(c.Query("query"))
+
+	if dir == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path required"})
+		return
+	}
+
+	skipDirs := map[string]bool{
+		"node_modules": true, "vendor": true, ".git": true,
+		"dist": true, "build": true, "__pycache__": true,
+		".next": true, "target": true, ".nuxt": true, "coverage": true,
+	}
+
+	var results []FileEntry
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == dir {
+			return nil
+		}
+
+		name := d.Name()
+		if strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() && skipDirs[name] {
+			return filepath.SkipDir
+		}
+
+		rel, _ := filepath.Rel(dir, path)
+		if query == "" || strings.Contains(strings.ToLower(rel), query) {
+			results = append(results, FileEntry{
+				Name:  rel,
+				Path:  path,
+				IsDir: d.IsDir(),
+			})
+		}
+
+		if len(results) >= 20 {
+			return errWalkLimit
+		}
+		return nil
+	})
+
+	if results == nil {
+		results = []FileEntry{}
+	}
+	c.JSON(http.StatusOK, results)
+}
+
+func uploadFileHandler(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	uploadsDir := filepath.Join(clauductorDir(), "uploads")
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ext := filepath.Ext(header.Filename)
+	baseName := strings.TrimSuffix(header.Filename, ext)
+	id := generateID()[:8]
+	dstPath := filepath.Join(uploadsDir, baseName+"_"+id+ext)
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"path": dstPath,
+		"name": header.Filename,
+	})
+}
+
+func getProjectSettingsHandler(c *gin.Context) {
+	projectPath := c.Query("path")
+	if projectPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path required"})
+		return
+	}
+
+	claudeMdPath := filepath.Join(projectPath, "CLAUDE.md")
+	settingsJsonPath := filepath.Join(projectPath, ".claude", "settings.json")
+
+	claudeMd, _ := os.ReadFile(claudeMdPath)
+	settingsJson, _ := os.ReadFile(settingsJsonPath)
+
+	c.JSON(http.StatusOK, gin.H{
+		"claudeMd":     string(claudeMd),
+		"settingsJson": string(settingsJson),
+	})
+}
+
+func saveProjectSettingsHandler(c *gin.Context) {
+	projectPath := c.Query("path")
+	if projectPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path required"})
+		return
+	}
+
+	var body struct {
+		ClaudeMd     string `json:"claudeMd"`
+		SettingsJson string `json:"settingsJson"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	claudeMdPath := filepath.Join(projectPath, "CLAUDE.md")
+	settingsJsonPath := filepath.Join(projectPath, ".claude", "settings.json")
+
+	if body.ClaudeMd != "" {
+		if err := os.WriteFile(claudeMdPath, []byte(body.ClaudeMd), 0644); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write CLAUDE.md: " + err.Error()})
+			return
+		}
+	} else {
+		os.Remove(claudeMdPath)
+	}
+
+	if body.SettingsJson != "" {
+		claudeDir := filepath.Join(projectPath, ".claude")
+		if err := os.MkdirAll(claudeDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create .claude directory: " + err.Error()})
+			return
+		}
+
+		if err := os.WriteFile(settingsJsonPath, []byte(body.SettingsJson), 0644); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write settings.json: " + err.Error()})
+			return
+		}
+	} else {
+		os.Remove(settingsJsonPath)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "saved"})
 }
