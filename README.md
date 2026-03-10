@@ -1,65 +1,94 @@
-# Clauductor 🚂
+# Clauductor
 
-**Your AI needs a conductor**
+Visual web interface for Claude Code. See your AI's work as a real-time execution map - tool calls, file edits, bash commands while chatting.
 
-A beautiful web interface for Claude Code with real-time work visualization, session management, and project tracking.
+![Clauductor Screenshot](assets/clauductor_screenshot.png) 
 
 ## Features
 
-- 🗺️ **Real-time Work Map** - Visualize Claude's work with an interactive graph
-- 💬 **Beautiful Chat Interface** - Modern UI with syntax highlighting and streaming
-- 📁 **Project Management** - Organize work with projects and session history  
-- 🔐 **Permission Management** - Interactive prompts with YOLO mode
-- ⚙️ **Profiles & Settings** - Configure API keys and environment profiles
-- 🔄 **Auto-Updates** - Built-in update system with GitHub release notes
+- Real-time work map - see every tool call, file edit, and bash command visualized as it happens
+- Live chat with Claude Code in the browser
+- Bash output streaming - watch command output appear as it runs
+- Built-in MCP server for tool approval prompts
+- Session management - history, restore, and multiple concurrent sessions
+- Self-hosted - run on your server and use Claude Code from any device, anywhere
+- Single binary - no dependencies, works on Linux, macOS, Windows
 
-## Quick Install
+## Installation
 
-### Linux / macOS
+Linux / macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.sh | sh
 ```
 
-### Windows (PowerShell)
+On Linux, the installer picks `.deb` or `.rpm` if available, otherwise drops a standalone binary.
+
+Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.ps1 | iex
+iex (iwr -useb https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.ps1)
 ```
 
-**No sudo required** • Installs to `~/.local/bin` • Automatic PATH setup
+You can also grab binaries from [Releases](https://github.com/mikolajbadyl/clauductor/releases) or build from source with `make build`.
 
 ## Usage
 
-After installation:
-
 ```bash
-clauductor              # Start the server
-clauductor --help       # Show all options
+# Default - localhost:8080
+clauductor
+
+# Custom host and port
+clauductor --host 0.0.0.0 --port 3003
+
+# Service management (Linux only)
+clauductor service install --host=0.0.0.0 --port=3003  # Install systemd user service
+clauductor service enable    # Enable autostart on login
+clauductor service start     # Start the service
+clauductor service stop     # Stop the service
+clauductor service restart  # Restart the service
+clauductor service status   # Show service status
 ```
 
-Then open http://localhost:3420 in your browser.
+Open `http://localhost:8080` (or your configured port) in your browser.
 
-## Documentation
+## MCP server
 
-Visit our [landing page](https://mikolajbadyl.github.io/clauductor-landingpage) for more information.
-
-## Development
+Clauductor ships with a built-in MCP server for tool approval. The installer can set this up for you, or add it with the Claude CLI:
 
 ```bash
-# Install dependencies
-npm install
+claude mcp add --scope user clauductor-mcp -- $(which clauductor) --mcp
+```
 
-# Build frontend
-make frontend
+Or add it manually to `~/.claude.json`:
 
-# Build full application
+```json
+{
+  "mcpServers": {
+    "clauductor-mcp": {
+      "type": "stdio",
+      "command": "/path/to/clauductor",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+The MCP server auto-detects the backend port. Override with `BACKEND_URL` env var if needed.
+
+## Build
+
+```bash
+# Single binary (current platform)
 make build
 
-# Run in dev mode
-make dev
+# Cross-compile for all platforms
+make cross
+
+# Release with GoReleaser (creates .tar.gz, .deb, .rpm)
+goreleaser release --clean
 ```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT
