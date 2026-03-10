@@ -18,13 +18,13 @@ A beautiful web interface for Claude Code with real-time work visualization, ses
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://cdn.jsdelivr.net/gh/mikolajbadyl/clauductor@main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.sh | sh
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-irm https://cdn.jsdelivr.net/gh/mikolajbadyl/clauductor@main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mikolajbadyl/clauductor/main/install.ps1 | iex
 ```
 
 **No sudo required** • Installs to `~/.local/bin` • Automatic PATH setup
